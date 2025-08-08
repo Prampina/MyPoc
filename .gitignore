@@ -1,0 +1,11 @@
+.vs/**
+**/x64/**
+**/.vscode/**
+PocUserPanel/obj/*
+*.log
+PocUserPanel/bin/*
+Poc/sdv/*
+Poc/smvstats.txt
+Poc/runsdvui.cmd
+Poc/SDV-default.xml
+Poc/sdv-user.sdv
