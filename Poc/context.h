@@ -63,7 +63,7 @@ typedef struct _POC_STREAM_CONTEXT
     * 等待操作的授权进程结束以后，写入文件标识尾用
     */
     HANDLE ProcessId[POC_MAX_AUTHORIZED_PROCESS_COUNT];
-    BOOLEAN AppendTailerThreadStart;
+    BOOLEAN AppendHeaderThreadStart;
 
     /*
     * 这个FO会在Write完成以后ObDereferenceObject，

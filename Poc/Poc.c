@@ -540,10 +540,10 @@ Return Value:
         goto EXIT;
     }
 
-    RtlMoveMemory(EncryptionTailer.Flag, POC_ENCRYPTION_HEADER_FLAG, strlen(POC_ENCRYPTION_HEADER_FLAG));
+    RtlMoveMemory(EncryptionHeader.Flag, POC_ENCRYPTION_HEADER_FLAG, strlen(POC_ENCRYPTION_HEADER_FLAG));
 
     RtlMoveMemory(
-        EncryptionTailer.EncryptionAlgorithmType,
+        EncryptionHeader.EncryptionAlgorithmType,
         POC_ENCRYPTION_HEADER_EA_TYPE, 
         strlen(POC_ENCRYPTION_HEADER_EA_TYPE));
 
@@ -944,10 +944,10 @@ PocPostCreateOperationWhenSafe(
     if (FALSE == StreamContext->IsCipherText)
     {
 
-        Status = PocCreateFileForEncTailer(FltObjects, StreamContext, ProcessName);
+        Status = PocCreateFileForEncHeader(FltObjects, StreamContext, ProcessName);
 
-        if (POC_FILE_HAS_ENCRYPTION_TAILER == Status ||
-            POC_TAILER_WRONG_FILE_NAME == Status)
+        if (POC_FILE_HAS_ENCRYPTION_HEADER == Status ||
+            POC_HEADER_WRONG_FILE_NAME == Status)
         {
             PocUpdateFlagInStreamContext(StreamContext, Status);
         }
@@ -1221,17 +1221,17 @@ PocPostCloseOperationWhenSafe(
     */
     ExAcquireResourceSharedLite(StreamContext->Resource, TRUE);
 
-    if ((POC_TO_APPEND_ENCRYPTION_TAILER == StreamContext->Flag ||
-        POC_TAILER_WRONG_FILE_NAME == StreamContext->Flag ||
+    if ((POC_TO_APPEND_ENCRYPTION_HEADER == StreamContext->Flag ||
+        POC_HEADER_WRONG_FILE_NAME == StreamContext->Flag ||
         POC_RENAME_TO_ENCRYPT == StreamContext->Flag ||
         POC_TO_DECRYPT_FILE == StreamContext->Flag) &&
-        StreamContext->AppendTailerThreadStart == FALSE)
+        StreamContext->AppendHeaderThreadStart == FALSE)
     {
         ExReleaseResourceLite(StreamContext->Resource);
 
         ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
 
-        StreamContext->AppendTailerThreadStart = TRUE;
+        StreamContext->AppendHeaderThreadStart = TRUE;
 
         ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
 
@@ -1241,19 +1241,19 @@ PocPostCloseOperationWhenSafe(
             NULL,
             NULL,
             NULL,
-            PocAppendEncTailerThread,
+            PocAppendEncHeaderThread,
             StreamContext);
 
         if (STATUS_SUCCESS != Status)
         {
             PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                ("%s->PsCreateSystemThread PocAppendEncTailerThread failed. Status = 0x%x.\n",
+                ("%s->PsCreateSystemThread PocAppendEncHeaderThread failed. Status = 0x%x.\n",
                     __FUNCTION__,
                     Status));
 
             ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
 
-            StreamContext->AppendTailerThreadStart = FALSE;
+            StreamContext->AppendHeaderThreadStart = FALSE;
 
             ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
 
@@ -1262,7 +1262,7 @@ PocPostCloseOperationWhenSafe(
         }
 
         PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-            ("%s->PsCreateSystemThread PocAppendEncTailerThread %ws init success. FileSize = %I64d.\n",
+            ("%s->PsCreateSystemThread PocAppendEncHeaderThread %ws init success. FileSize = %I64d.\n",
                 __FUNCTION__,
                 StreamContext->FileName,
                 StreamContext->FileSize));

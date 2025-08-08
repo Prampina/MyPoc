@@ -4,7 +4,7 @@
 #include "context.h"
 #include "utils.h"
 
-typedef struct _POC_ENCRYPTION_TAILER
+typedef struct _POC_ENCRYPTION_HEADER
 {
 	CHAR Flag[32];
 	WCHAR FileName[POC_MAX_NAME_LENGTH];
@@ -13,9 +13,9 @@ typedef struct _POC_ENCRYPTION_TAILER
 	CHAR EncryptionAlgorithmType[32];
 	CHAR KeyAndCiphertextHash[32];
 
-}POC_ENCRYPTION_TAILER, * PPOC_ENCRYPTION_TAILER;
+}POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
 
-extern POC_ENCRYPTION_TAILER EncryptionTailer;
+extern POC_ENCRYPTION_HEADER EncryptionHeader;
 
 NTSTATUS PocReadFileNoCache(
 	IN PFLT_INSTANCE Instance,
@@ -33,12 +33,12 @@ NTSTATUS PocWriteFileIntoCache(
 	IN PCHAR WriteBuffer,
 	IN ULONG WriteLength);
 
-NTSTATUS PocCreateFileForEncTailer(
+NTSTATUS PocCreateFileForEncHeader(
 	IN PCFLT_RELATED_OBJECTS FltObjects,
 	IN PPOC_STREAM_CONTEXT StreamContext,
 	IN PWCHAR ProcessName);
 
-NTSTATUS PocAppendEncTailerToFile(
+NTSTATUS PocAppendEncHeaderToFile(
 	IN PFLT_VOLUME Volume,
 	IN PFLT_INSTANCE Instance,
 	IN PPOC_STREAM_CONTEXT StreamContext);
@@ -59,7 +59,7 @@ NTSTATUS PocReentryToDecrypt(
 	IN PFLT_INSTANCE Instance,
 	IN PWCHAR FileName);
 
-KSTART_ROUTINE PocAppendEncTailerThread;
+KSTART_ROUTINE PocAppendEncHeaderThread;
 
 NTSTATUS PocReadFileFromCache(
 	IN PFLT_INSTANCE Instance,

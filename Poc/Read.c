@@ -125,7 +125,7 @@ PocPreReadOperation(
         * 
         *    StreamContext->FileSize             SectorSize                          Fcb->FileSize               Fcb->Allocation
         *              |
-        *           |123.......|.....................|....Tailer...........................|...........................|
+        *           |123.......|.....................|....Header...........................|...........................|
         *           0         0x10                 0x200                                 0x1200                      0x1600
         *                      |
         *                AES_BLOCK_SIZE
@@ -197,7 +197,7 @@ PocPreReadOperation(
                 POC_PR_ACCESS_BACKUP == OutProcessInfo->OwnedProcessRule->Access)
             {
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                    ("%s->Backup process %ws read the tailer of file %ws. StartingVbo = %I64d ByteCount = %I64d FileSize = %I64d\n",
+                    ("%s->Backup process %ws read the header of file %ws. StartingVbo = %I64d ByteCount = %I64d FileSize = %I64d\n",
                         __FUNCTION__,
                         ProcessName,
                         StreamContext->FileName,
@@ -281,7 +281,7 @@ PocPreReadOperation(
         else if (StartingVbo >= StreamContext->FileSize)
         {
             PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                ("%s->Backup process NoncachedIo %ws read the tailer of file %ws. StartingVbo = %I64d Length = %I64d FileSize = %I64d\n",
+                ("%s->Backup process NoncachedIo %ws read the header of file %ws. StartingVbo = %I64d Length = %I64d FileSize = %I64d\n",
                     __FUNCTION__,
                     ProcessName,
                     StreamContext->FileName,

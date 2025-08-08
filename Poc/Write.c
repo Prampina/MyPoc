@@ -320,9 +320,9 @@ PocPreWriteOperation(
                 StartingVbo + ByteCount >= FileSize - PAGE_SIZE + SectorSize)
             {
                 if (strncmp(
-                    ((PPOC_ENCRYPTION_TAILER)(OrigBuffer + FileSize - PAGE_SIZE - StartingVbo))->Flag, 
-                    EncryptionTailer.Flag,
-                    strlen(EncryptionTailer.Flag)) == 0)
+                    ((PPOC_ENCRYPTION_HEADER)(OrigBuffer + FileSize - PAGE_SIZE - StartingVbo))->Flag, 
+                    EncryptionHeader.Flag,
+                    strlen(EncryptionHeader.Flag)) == 0)
                 {
 
                     ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
@@ -746,7 +746,7 @@ PocPostWriteOperation(
             /*
             * 文件被加密，我们在PostClose给它写入文件标识尾
             */
-            PocUpdateFlagInStreamContext(StreamContext, POC_TO_APPEND_ENCRYPTION_TAILER);
+            PocUpdateFlagInStreamContext(StreamContext, POC_TO_APPEND_ENCRYPTION_HEADER);
         }
 
         /*
