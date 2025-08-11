@@ -51,6 +51,10 @@ PocPreReadOperation(
 
     PPOC_CREATED_PROCESS_INFO OutProcessInfo = NULL;
 
+    // 新增：加密头相关变量
+    POC_ENCRYPTION_HEADER Header = { 0 };
+    const ULONG HeaderSize = sizeof(POC_ENCRYPTION_HEADER);  // 假设标识头大小为结构体大小
+
     StartingVbo = Data->Iopb->Parameters.Read.ByteOffset.QuadPart;
     ByteCount = Data->Iopb->Parameters.Read.Length;
 
@@ -98,6 +102,41 @@ PocPreReadOperation(
         goto ERROR;
     }
 
+    // 新增：优先读取标识头初始化元数据（若未初始化）
+    if (!StreamContext->IsCipherText || StreamContext->FileSize == 0)
+    {
+        Status = PocReadEncryptHeader(
+            Data->Iopb->TargetInstance,
+            FltObjects->Volume,
+            StreamContext->FileName,
+            &Header);
+
+        if (NT_SUCCESS(Status))
+        {
+            // 用标识头更新StreamContext元数据
+            ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
+            StreamContext->IsCipherText = Header.IsCipherText;
+            StreamContext->FileSize = Header.FileSize;  // 原始文件大小（不含标识头）
+            // 拷贝文件名（校验一致性）
+            if (wcslen(Header.FileName) < POC_MAX_NAME_LENGTH)
+            {
+                RtlMoveMemory(StreamContext->FileName, Header.FileName, wcslen(Header.FileName) * sizeof(WCHAR));
+            }
+            ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
+
+            PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+                ("PocPreReadOperation->Updated from header: %ws, size=%I64d, encrypted=%d\n",
+                    StreamContext->FileName, StreamContext->FileSize, StreamContext->IsCipherText));
+        }
+        else
+        {
+            // 标识头读取失败，fallback到原有标识尾逻辑（兼容旧文件）
+            PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+                ("PocPreReadOperation->No header, fallback to tail check. Status=0x%x\n", Status));
+            // 此处可调用原有标识尾校验函数（如PocCreateFileForEncTailer）
+        }
+    }
+
     if (!StreamContext->IsCipherText)
     {
         /*
@@ -109,6 +148,38 @@ PocPreReadOperation(
         goto ERROR;
     }
 
+    // 新增：调整读取偏移（跳过标识头）
+    if (StartingVbo < HeaderSize)
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+            ("PocPreReadOperation->Skip header. Old offset=%I64d, new offset=%I64d\n",
+                StartingVbo, HeaderSize));
+        StartingVbo = HeaderSize;
+        Data->Iopb->Parameters.Read.ByteOffset.QuadPart = StartingVbo;
+        FltSetCallbackDataDirty(Data);
+    }
+
+    // 修正文件大小判断（原始大小 = 标识头中记录的FileSize，不含标识头）
+    if (StartingVbo - HeaderSize >= StreamContext->FileSize)
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+            ("PocPreReadOperation->End of file. Offset=%I64d, size=%I64d\n",
+                StartingVbo, StreamContext->FileSize));
+        Data->IoStatus.Status = STATUS_END_OF_FILE;
+        Data->IoStatus.Information = 0;
+        Status = FLT_PREOP_COMPLETE;
+        goto ERROR;
+    }
+    // 修正读取长度（不超过原始文件大小）
+    else if (StartingVbo - HeaderSize + ByteCount > StreamContext->FileSize)
+    {
+        ULONG NewLength = (ULONG)(StreamContext->FileSize - (StartingVbo - HeaderSize));
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+            ("PocPreReadOperation->Truncate read. Old=%I64d, new=%d\n",
+                ByteCount, NewLength));
+        Data->Iopb->Parameters.Read.Length = NewLength;
+        FltSetCallbackDataDirty(Data);
+    }
 
     Status = PocGetProcessName(Data, ProcessName);
 
@@ -125,7 +196,7 @@ PocPreReadOperation(
         * 
         *    StreamContext->FileSize             SectorSize                          Fcb->FileSize               Fcb->Allocation
         *              |
-        *           |123.......|.....................|....Tailer...........................|...........................|
+        *           |123.......|.....................|....Header...........................|...........................|
         *           0         0x10                 0x200                                 0x1200                      0x1600
         *                      |
         *                AES_BLOCK_SIZE
@@ -191,13 +262,13 @@ PocPreReadOperation(
             goto ERROR;
         }
 
-        if (StartingVbo >= StreamContext->FileSize)
+        if (StartingVbo >= StreamContext->FileSize + HeaderSize)  // 修正：加上标识头大小
         {
             if (NULL != OutProcessInfo &&
                 POC_PR_ACCESS_BACKUP == OutProcessInfo->OwnedProcessRule->Access)
             {
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                    ("%s->Backup process %ws read the tailer of file %ws. StartingVbo = %I64d ByteCount = %I64d FileSize = %I64d\n",
+                    ("%s->Backup process %ws read the header of file %ws. StartingVbo = %I64d ByteCount = %I64d FileSize = %I64d\n",
                         __FUNCTION__,
                         ProcessName,
                         StreamContext->FileName,
@@ -213,7 +284,7 @@ PocPreReadOperation(
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->%ws cachedio startingvbo over end of file %ws. StartingVbo = %I64d FileSize = %I64d\n",
                     __FUNCTION__, ProcessName,
                     StreamContext->FileName,
-                    StartingVbo, StreamContext->FileSize));
+                    StartingVbo, StreamContext->FileSize + HeaderSize));  // 修正：显示总大小
 
                 Data->IoStatus.Status = STATUS_END_OF_FILE;
                 Data->IoStatus.Information = 0;
@@ -223,7 +294,7 @@ PocPreReadOperation(
             }
             
         }
-        else if (StartingVbo + ByteCount > StreamContext->FileSize)
+        else if (StartingVbo + ByteCount > StreamContext->FileSize + HeaderSize)  // 修正：加上标识头大小
         {
             if (NULL != OutProcessInfo &&
                 POC_PR_ACCESS_BACKUP == OutProcessInfo->OwnedProcessRule->Access)
@@ -247,7 +318,7 @@ PocPreReadOperation(
                     ProcessName,
                     StreamContext->FileName,
                     Data->Iopb->Parameters.Read.Length,
-                    StreamContext->FileSize - StartingVbo));
+                    (StreamContext->FileSize + HeaderSize) - StartingVbo));  // 修正：计算新长度
 
                 Data->Iopb->Parameters.Read.Length = (ULONG)(StreamContext->FileSize - StartingVbo);
                 FltSetCallbackDataDirty(Data);
@@ -263,14 +334,15 @@ PocPreReadOperation(
         * 明文缓冲不能有标识尾，首先没有必要，其次还需要在PostRead中不解密标识尾这一块数据，所以直接不读出，
         * 密文缓冲中有标识尾。
         */
-        if (StartingVbo >= StreamContext->FileSize &&
+        if (StartingVbo >= StreamContext->FileSize + HeaderSize &&  // 修正：加上标识头大小
             FltObjects->FileObject->SectionObjectPointer !=
             StreamContext->ShadowSectionObjectPointers)
         {
             PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->%ws noncachedio read end of file %ws. StartingVbo = %I64d FileSize = %I64d\n",
                 __FUNCTION__, ProcessName,
                 StreamContext->FileName,
-                StartingVbo, StreamContext->FileSize));
+                StartingVbo, StreamContext->FileSize + HeaderSize));  // 修正：显示总大小
+
 
             Data->IoStatus.Status = STATUS_END_OF_FILE;
             Data->IoStatus.Information = 0;
@@ -278,10 +350,10 @@ PocPreReadOperation(
             Status = FLT_PREOP_COMPLETE;
             goto ERROR;
         }
-        else if (StartingVbo >= StreamContext->FileSize)
+        else if (StartingVbo >= StreamContext->FileSize + HeaderSize)  // 修正：加上标识头大小
         {
             PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                ("%s->Backup process NoncachedIo %ws read the tailer of file %ws. StartingVbo = %I64d Length = %I64d FileSize = %I64d\n",
+                ("%s->Backup process NoncachedIo %ws read the header of file %ws. StartingVbo = %I64d Length = %I64d FileSize = %I64d\n",
                     __FUNCTION__,
                     ProcessName,
                     StreamContext->FileName,

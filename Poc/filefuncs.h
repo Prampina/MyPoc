@@ -4,7 +4,22 @@
 #include "context.h"
 #include "utils.h"
 
-typedef struct _POC_ENCRYPTION_TAILER
+#define POC_HEADER_SIZE 4096  // 4KB固定大小标识头
+
+// 新增：标识头结构（与标识尾元数据一致，存储在文件头部）
+typedef struct _POC_ENCRYPTION_HEADER
+{
+	CHAR Flag[32];               // 标识头特征（如"FOKS-TROT-HEADER"）
+	WCHAR FileName[POC_MAX_NAME_LENGTH];  // 文件名
+	LONGLONG FileSize;           // 原始文件大小（不含标识头）
+	LONGLONG HeaderSize;            // 标识头自身大小（用于偏移计算）
+	BOOLEAN IsCipherText;        // 是否加密
+	CHAR EncryptionAlgorithmType[32];  // 加密算法
+	CHAR KeyAndCiphertextHash[32];     // 哈希校验
+	
+} POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
+
+typedef struct _POC_ENCRYPTION_HEADER
 {
 	CHAR Flag[32];
 	WCHAR FileName[POC_MAX_NAME_LENGTH];
@@ -13,9 +28,18 @@ typedef struct _POC_ENCRYPTION_TAILER
 	CHAR EncryptionAlgorithmType[32];
 	CHAR KeyAndCiphertextHash[32];
 
-}POC_ENCRYPTION_TAILER, * PPOC_ENCRYPTION_TAILER;
+}POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
 
-extern POC_ENCRYPTION_TAILER EncryptionTailer;
+extern POC_ENCRYPTION_HEADER EncryptionHeader;
+
+extern POC_ENCRYPTION_HEADER EncryptionHeader;  // 新增：标识头全局实例
+
+// 新增：读取标识头函数声明
+NTSTATUS PocReadEncryptHeader(
+	IN PFLT_INSTANCE Instance,
+	IN PFLT_VOLUME Volume,
+	IN PWCHAR FileName,
+	OUT PPOC_ENCRYPTION_HEADER OutHeader);
 
 NTSTATUS PocReadFileNoCache(
 	IN PFLT_INSTANCE Instance,
@@ -33,12 +57,12 @@ NTSTATUS PocWriteFileIntoCache(
 	IN PCHAR WriteBuffer,
 	IN ULONG WriteLength);
 
-NTSTATUS PocCreateFileForEncTailer(
+NTSTATUS PocCreateFileForEncHeader(
 	IN PCFLT_RELATED_OBJECTS FltObjects,
 	IN PPOC_STREAM_CONTEXT StreamContext,
 	IN PWCHAR ProcessName);
 
-NTSTATUS PocAppendEncTailerToFile(
+NTSTATUS PocAppendEncHeaderToFile(
 	IN PFLT_VOLUME Volume,
 	IN PFLT_INSTANCE Instance,
 	IN PPOC_STREAM_CONTEXT StreamContext);
@@ -59,7 +83,7 @@ NTSTATUS PocReentryToDecrypt(
 	IN PFLT_INSTANCE Instance,
 	IN PWCHAR FileName);
 
-KSTART_ROUTINE PocAppendEncTailerThread;
+KSTART_ROUTINE PocAppendEncHeaderThread;
 
 NTSTATUS PocReadFileFromCache(
 	IN PFLT_INSTANCE Instance,

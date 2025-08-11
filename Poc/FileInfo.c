@@ -537,8 +537,8 @@ PocPostSetInformationOperationWhenSafe(
         {
             /*
             * 到这里，说明是目标扩展名改成目标或非目标扩展名，这里即便已经是密文，我们也不修改尾部里的FileName
-            * 当再一次Create时，会由PostCreate->PocCreateFileForEncTailer判断文件名是否一致，
-            * 不一致则会交给PostClose修改Tailer
+            * 当再一次Create时，会由PostCreate->PocCreateFileForEncHeader判断文件名是否一致，
+            * 不一致则会交给PostClose修改Header
             */
 
             Status = PocBypassIrrelevantBy_PathAndExtension(Data);
@@ -614,7 +614,7 @@ PocPostSetInformationOperationWhenSafe(
 
                 /*
                 * POC_IS_TARGET_FILE_EXTENSION说明文件改成目标扩展名
-                * 重入一波，让我们的PostCreate读一下是否有Tailer(有可能是目标扩展名密文->其他扩展名->目标扩展名的情况)，
+                * 重入一波，让我们的PostCreate读一下是否有Header(有可能是目标扩展名密文->其他扩展名->目标扩展名的情况)，
                 */
                 RtlZeroMemory(NewFileName, sizeof(NewFileName));
 
