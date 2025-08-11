@@ -4,6 +4,17 @@
 #include "context.h"
 #include "utils.h"
 
+#define POC_HEADER_SIZE 4096  // 4KB固定大小标识头
+
+typedef struct _POC_FILE_HEADER {
+	UCHAR Signature[8];       // 文件标识签名，如"POC_ENC"
+	UCHAR AlgorithmType;      // 加密算法类型
+	UCHAR KeyHash[32];        // 密钥哈希值
+	LONGLONG OriginalSize;    // 原始文件大小
+	UCHAR Checksum[16];       // 校验信息
+	UCHAR Reserved[POC_HEADER_SIZE - 8 - 1 - 32 - 8 - 16];  // 预留空间
+} POC_FILE_HEADER, * PPOC_FILE_HEADER;
+
 typedef struct _POC_ENCRYPTION_HEADER
 {
 	CHAR Flag[32];
@@ -16,6 +27,8 @@ typedef struct _POC_ENCRYPTION_HEADER
 }POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
 
 extern POC_ENCRYPTION_HEADER EncryptionHeader;
+
+extern POC_FILE_HEADER EncryptionHeader;
 
 NTSTATUS PocReadFileNoCache(
 	IN PFLT_INSTANCE Instance,

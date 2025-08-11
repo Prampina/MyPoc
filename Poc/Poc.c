@@ -109,6 +109,13 @@ PocPostCloseOperationWhenSafe(
     _In_ FLT_POST_OPERATION_FLAGS Flags
 );
 
+// 新增标识头相关函数声明
+NTSTATUS
+PocInitializeFileHeader(PPOC_FILE_HEADER Header);
+
+NTSTATUS
+PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_FILE_HEADER Header);
+
 EXTERN_C_END
 
 //
@@ -711,6 +718,12 @@ PocPreCreateOperation (
 
     WCHAR FileName[POC_MAX_NAME_LENGTH] = { 0 };
 
+    // 新增：过滤目录文件（不处理目录）
+    if (Data->Iopb->Parameters.Create.Options & FILE_DIRECTORY_FILE) {
+        *CompletionContext = NULL;
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
     Status = PocGetFileNameOrExtension(Data, NULL, FileName);
 
     if (STATUS_SUCCESS != Status)
@@ -761,6 +774,9 @@ PocPreCreateOperation (
         Status = FLT_PREOP_DISALLOW_FASTIO;
         goto EXIT;
     }
+
+    // 新增：通过CompletionContext标记是否为新文件创建（FILE_CREATE标志）
+    *CompletionContext = (PVOID)(ULONG_PTR)(Data->Iopb->Parameters.Create.Options & FILE_CREATE);
 
     Status = FLT_PREOP_SUCCESS_WITH_CALLBACK;
 
@@ -899,6 +915,26 @@ PocPostCreateOperationWhenSafe(
         StreamContext->Instance = FltObjects->Instance;
 
         ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
+
+        // --------------------------
+       // 新增：标识头初始化（仅在StreamContext首次创建时执行）
+       // --------------------------
+        if (ContextCreated)
+        {
+            NTSTATUS headerInitStatus;
+            // 初始化标识头（包含文件基础信息，与标识尾字段对应但存储在文件头部）
+            headerInitStatus = PocInitEncryptHeader(StreamContext, FileName);
+            if (!NT_SUCCESS(headerInitStatus))
+            {
+                PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->Failed to init encrypt header. Status = 0x%x\n",
+                    __FUNCTION__, headerInitStatus));
+            }
+            else
+            {
+                PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->Encrypt header initialized for file: %ws\n",
+                    __FUNCTION__, FileName));
+            }
+        }
 
     }
 
@@ -1290,4 +1326,78 @@ PocPostCloseOperationWhenSafe(
 EXIT:
 
     return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+
+// 初始化文件标识头内容
+NTSTATUS PocInitializeFileHeader(PPOC_FILE_HEADER Header)
+{
+    if (Header == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // 填充标识头签名（8字节，需与解密逻辑对应）
+    RtlCopyMemory(Header->Signature, "POC_ENC", 8);
+    // 设置加密算法类型（示例：AES-256）
+    Header->AlgorithmType = 0x01;  // 可在global.h中定义枚举
+    // 预留字段清零
+    RtlZeroMemory(Header->Reserved, sizeof(Header->Reserved));
+    RtlZeroMemory(Header->KeyHash, sizeof(Header->KeyHash));
+    RtlZeroMemory(Header->Checksum, sizeof(Header->Checksum));
+    Header->OriginalSize = 0;  // 新文件原始大小为0
+
+    return STATUS_SUCCESS;
+}
+
+// 将标识头写入文件起始位置（非缓存IO）
+NTSTATUS PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_FILE_HEADER Header)
+{
+    if (Instance == NULL || FileObject == NULL || Header == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NTSTATUS status;
+    LARGE_INTEGER byteOffset = { 0 };  // 标识头固定写入文件开头
+    ULONG bytesWritten;
+    const ULONG headerSize = POC_HEADER_SIZE;  // 4096字节
+
+    // 分配对齐的缓冲区（匹配磁盘扇区对齐）
+    PCHAR headerBuffer = FltAllocatePoolAlignedWithTag(
+        Instance,
+        NonPagedPool,
+        headerSize,
+        'hPOC'  // 自定义Tag，需唯一
+    );
+    if (headerBuffer == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // 填充缓冲区（标识头数据 + 剩余空间清零）
+    RtlZeroMemory(headerBuffer, headerSize);
+    RtlCopyMemory(headerBuffer, Header, sizeof(POC_FILE_HEADER));
+
+    // 写入文件（非缓存方式确保立即生效）
+    status = FltWriteFileEx(
+        Instance,
+        FileObject,
+        &byteOffset,
+        headerSize,
+        headerBuffer,
+        FLTFL_IO_OPERATION_NON_CACHED,
+        &bytesWritten,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+    );
+
+    // 释放缓冲区
+    FltFreePoolAlignedWithTag(Instance, headerBuffer, 'hPOC');
+
+    // 校验写入结果
+    if (!NT_SUCCESS(status) || bytesWritten != headerSize) {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    return STATUS_SUCCESS;
 }

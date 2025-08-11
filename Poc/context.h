@@ -86,6 +86,11 @@ typedef struct _POC_STREAM_CONTEXT
 
     PERESOURCE Resource;
 
+    // 新增：标识头相关字段
+    ULONG HeaderSize;         // 标识头大小（固定为POC_HEADER_SIZE）
+    BOOLEAN HasHeader;        // 是否已写入标识头
+    LONGLONG OriginalSize;    // 原始文件大小（与标识头中OriginalSize同步）
+
 } POC_STREAM_CONTEXT, * PPOC_STREAM_CONTEXT;
 
 #define POC_STREAM_CONTEXT_SIZE         sizeof(POC_STREAM_CONTEXT)
