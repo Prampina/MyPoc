@@ -25,7 +25,8 @@ NTSTATUS PocInitShadowSectionObjectPointers(
 	NTSTATUS Status = STATUS_UNSUCCESSFUL;
 
 
-	LARGE_INTEGER ByteOffset = { 0 };
+	// 调整：从标识头之后开始读取，跳过标识头区域
+	LARGE_INTEGER ByteOffset = { .QuadPart = POC_HEADER_SIZE };
 	CHAR Buffer = { 0 };
 
 	PFILE_OBJECT FileObject = FltObjects->FileObject;
@@ -47,7 +48,8 @@ NTSTATUS PocInitShadowSectionObjectPointers(
 
 	FileObject->SectionObjectPointer = StreamContext->ShadowSectionObjectPointers;
 
-	Status = FltReadFileEx(FltObjects->Instance, FileObject, &ByteOffset, 
+	// 调整：读取位置从标识头之后开始，确保缓存初始化跳过标识头
+	Status = FltReadFileEx(FltObjects->Instance, FileObject, &ByteOffset,
 		sizeof(Buffer), &Buffer, 0, NULL, NULL, NULL, NULL, NULL);
 
 	if (!NT_SUCCESS(Status) && STATUS_END_OF_FILE != Status)

@@ -172,6 +172,59 @@ EXIT:
 	return Status;
 }
 
+// 新增：标识头读取函数
+NTSTATUS PocReadEncryptHeader(
+    IN PFLT_INSTANCE Instance,
+    IN PFLT_VOLUME Volume,
+    IN PWCHAR FileName,
+    OUT PPOC_ENCRYPTION_HEADER OutHeader)
+{
+    if (NULL == FileName || NULL == OutHeader)
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocReadEncryptHeader->Invalid parameters\n"));
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NTSTATUS Status;
+    PCHAR ReadBuffer = NULL;
+    ULONG BytesRead = 0;
+    LARGE_INTEGER ByteOffset = { 0 };  // 从文件头部（0偏移）读取
+
+    // 读取标识头大小的数据（固定为结构体大小）
+    Status = PocReadFileNoCache(
+        Instance,
+        Volume,
+        FileName,
+        ByteOffset,
+        sizeof(POC_ENCRYPTION_HEADER),
+        &ReadBuffer,
+        &BytesRead);
+
+    if (!NT_SUCCESS(Status) || BytesRead != sizeof(POC_ENCRYPTION_HEADER))
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocReadEncryptHeader->Read failed. Status=0x%x\n", Status));
+        goto EXIT;
+    }
+
+    // 拷贝并校验标识头
+    RtlCopyMemory(OutHeader, ReadBuffer, sizeof(POC_ENCRYPTION_HEADER));
+    if (strncmp(OutHeader->Flag, EncryptionHeader.Flag, strlen(EncryptionHeader.Flag)) != 0)
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocReadEncryptHeader->Invalid header flag\n"));
+        Status = STATUS_FILE_CORRUPT;
+        goto EXIT;
+    }
+
+    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocReadEncryptHeader->Read header for %ws success\n", FileName));
+
+EXIT:
+    if (ReadBuffer != NULL)
+    {
+        FltFreePoolAlignedWithTag(Instance, ReadBuffer, READ_BUFFER_TAG);
+    }
+    return Status;
+}
+
 
 NTSTATUS PocReadFileFromCache(
     IN PFLT_INSTANCE Instance,
@@ -1882,3 +1935,4 @@ EXIT:
     }
 
 }
+

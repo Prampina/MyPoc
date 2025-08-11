@@ -6,14 +6,18 @@
 
 #define POC_HEADER_SIZE 4096  // 4KB固定大小标识头
 
-typedef struct _POC_FILE_HEADER {
-	UCHAR Signature[8];       // 文件标识签名，如"POC_ENC"
-	UCHAR AlgorithmType;      // 加密算法类型
-	UCHAR KeyHash[32];        // 密钥哈希值
-	LONGLONG OriginalSize;    // 原始文件大小
-	UCHAR Checksum[16];       // 校验信息
-	UCHAR Reserved[POC_HEADER_SIZE - 8 - 1 - 32 - 8 - 16];  // 预留空间
-} POC_FILE_HEADER, * PPOC_FILE_HEADER;
+// 新增：标识头结构（与标识尾元数据一致，存储在文件头部）
+typedef struct _POC_ENCRYPTION_HEADER
+{
+	CHAR Flag[32];               // 标识头特征（如"FOKS-TROT-HEADER"）
+	WCHAR FileName[POC_MAX_NAME_LENGTH];  // 文件名
+	LONGLONG FileSize;           // 原始文件大小（不含标识头）
+	LONGLONG HeaderSize;            // 标识头自身大小（用于偏移计算）
+	BOOLEAN IsCipherText;        // 是否加密
+	CHAR EncryptionAlgorithmType[32];  // 加密算法
+	CHAR KeyAndCiphertextHash[32];     // 哈希校验
+	
+} POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
 
 typedef struct _POC_ENCRYPTION_HEADER
 {
@@ -28,7 +32,14 @@ typedef struct _POC_ENCRYPTION_HEADER
 
 extern POC_ENCRYPTION_HEADER EncryptionHeader;
 
-extern POC_FILE_HEADER EncryptionHeader;
+extern POC_ENCRYPTION_HEADER EncryptionHeader;  // 新增：标识头全局实例
+
+// 新增：读取标识头函数声明
+NTSTATUS PocReadEncryptHeader(
+	IN PFLT_INSTANCE Instance,
+	IN PFLT_VOLUME Volume,
+	IN PWCHAR FileName,
+	OUT PPOC_ENCRYPTION_HEADER OutHeader);
 
 NTSTATUS PocReadFileNoCache(
 	IN PFLT_INSTANCE Instance,

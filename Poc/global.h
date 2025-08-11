@@ -92,6 +92,8 @@ const static ULONG gTraceFlags = 0x00000001;
         }                                                                                                                           \
     }
 
+// ÔÚglobal.hÖÐÌí¼Ó
+#define STATUS_FILE_CORRUPT ((NTSTATUS)0xC00000F8L)
 
 #define MAX_SECURE_EXTENSION_COUNT              256
 #define POC_MAX_AUTHORIZED_PROCESS_COUNT        32

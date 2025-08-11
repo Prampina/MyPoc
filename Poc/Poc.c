@@ -111,10 +111,10 @@ PocPostCloseOperationWhenSafe(
 
 // 新增标识头相关函数声明
 NTSTATUS
-PocInitializeFileHeader(PPOC_FILE_HEADER Header);
+PocInitializeFileHeader(PPOC_ENCRYPTION_HEADER Header);
 
 NTSTATUS
-PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_FILE_HEADER Header);
+PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_ENCRYPTION_HEADER Header);
 
 EXTERN_C_END
 
@@ -1330,27 +1330,31 @@ EXIT:
 
 
 // 初始化文件标识头内容
-NTSTATUS PocInitializeFileHeader(PPOC_FILE_HEADER Header)
+NTSTATUS PocInitializeFileHeader(PPOC_ENCRYPTION_HEADER Header)
 {
     if (Header == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // 填充标识头签名（8字节，需与解密逻辑对应）
-    RtlCopyMemory(Header->Signature, "POC_ENC", 8);
-    // 设置加密算法类型（示例：AES-256）
-    Header->AlgorithmType = 0x01;  // 可在global.h中定义枚举
-    // 预留字段清零
-    RtlZeroMemory(Header->Reserved, sizeof(Header->Reserved));
-    RtlZeroMemory(Header->KeyHash, sizeof(Header->KeyHash));
-    RtlZeroMemory(Header->Checksum, sizeof(Header->Checksum));
-    Header->OriginalSize = 0;  // 新文件原始大小为0
+    // 填充标识头特征（对应结构体的Flag字段，原代码误用为Signature）
+    RtlCopyMemory(Header->Flag, "POC_ENC", 8);  // 注意：Flag字段大小为32字节，此处仅填充前8字节
+    // 设置加密算法类型（对应结构体的EncryptionAlgorithmType字段，原代码误用为AlgorithmType）
+    RtlCopyMemory(Header->EncryptionAlgorithmType, "AES-256", 7);  // 算法名存入32字节数组
+    // 原始文件大小（对应结构体的FileSize字段，原代码误用为OriginalSize）
+    Header->FileSize = 0;  // 新文件原始大小为0
+    // 哈希校验（对应结构体的KeyAndCiphertextHash字段，原代码误用为KeyHash/Checksum）
+    RtlZeroMemory(Header->KeyAndCiphertextHash, sizeof(Header->KeyAndCiphertextHash));
+    
+    // 是否加密（结构体定义的IsCipherText字段，初始化为FALSE）
+    Header->IsCipherText = FALSE;
+    // 文件名（结构体定义的FileName字段，初始化为空）
+    RtlZeroMemory(Header->FileName, sizeof(Header->FileName));
 
     return STATUS_SUCCESS;
 }
 
 // 将标识头写入文件起始位置（非缓存IO）
-NTSTATUS PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_FILE_HEADER Header)
+NTSTATUS PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, PPOC_ENCRYPTION_HEADER Header)
 {
     if (Instance == NULL || FileObject == NULL || Header == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -1374,7 +1378,7 @@ NTSTATUS PocWriteHeaderToFile(PFLT_INSTANCE Instance, PFILE_OBJECT FileObject, P
 
     // 填充缓冲区（标识头数据 + 剩余空间清零）
     RtlZeroMemory(headerBuffer, headerSize);
-    RtlCopyMemory(headerBuffer, Header, sizeof(POC_FILE_HEADER));
+    RtlCopyMemory(headerBuffer, Header, sizeof(PPOC_ENCRYPTION_HEADER));
 
     // 写入文件（非缓存方式确保立即生效）
     status = FltWriteFileEx(
