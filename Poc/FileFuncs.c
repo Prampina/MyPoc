@@ -315,35 +315,34 @@ NTSTATUS PocCreateFileForEncHeader(
 
     FileSize = PocQueryEndOfFileInfo(FltObjects->Instance, FltObjects->FileObject);
 
-    if (FileSize < PAGE_SIZE)
+    // 检查文件大小是否至少能容纳加密头
+    if (FileSize < sizeof(POC_ENCRYPTION_HEADER))
     {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocCreateFileForEncHeader->File too small for header\n"));
         Status = STATUS_END_OF_FILE;
         goto EXIT;
     }
-
-    //PocReadFileNoCache里面会对ByteOffset对齐0x200
-    ByteOffset.QuadPart = FileSize - PAGE_SIZE;
-
 
     Status = PocReadFileNoCache(
         FltObjects->Instance,
         FltObjects->Volume,
         StreamContext->FileName,
         ByteOffset,
-        PAGE_SIZE,
+        sizeof(POC_ENCRYPTION_HEADER),  // 只读取加密头大小
         &OutReadBuffer,
         &BytesRead);
 
-    if (!NT_SUCCESS(Status) || NULL == OutReadBuffer)
+    if (!NT_SUCCESS(Status) || NULL == OutReadBuffer || BytesRead != sizeof(POC_ENCRYPTION_HEADER))
     {
         PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->PocReadFileNoCache failed. ProcessName = %ws Status = 0x%x\n", __FUNCTION__, ProcessName, Status));
         goto EXIT;
     }
 
-    if (strncmp(((PPOC_ENCRYPTION_HEADER)OutReadBuffer)->Flag, EncryptionHeader.Flag, 
+    // 校验加密头标识和文件名
+    if (strncmp(((PPOC_ENCRYPTION_HEADER)OutReadBuffer)->Flag, EncryptionHeader.Flag,
         strlen(EncryptionHeader.Flag)) == 0 &&
         wcsncmp(((PPOC_ENCRYPTION_HEADER)OutReadBuffer)->FileName, StreamContext->FileName,
-            wcslen(StreamContext->FileName)) == 0)
+            POC_MAX_NAME_LENGTH) == 0)  // 用固定长度避免wcslen风险
     {
 
         /*
@@ -471,7 +470,7 @@ NTSTATUS PocAppendEncHeaderToFile(
 
     LONGLONG FileSize = 0;
     LARGE_INTEGER ByteOffset = { 0 };
-    ULONG WriteLength = 0;
+    ULONG WriteLength = sizeof(POC_ENCRYPTION_HEADER);  // 仅写入加密头大小
     PCHAR WriteBuffer = NULL;
     ULONG BytesWritten = 0;
 
@@ -531,8 +530,7 @@ NTSTATUS PocAppendEncHeaderToFile(
 
     FileSize = StreamContext->FileSize;
 
-    WriteLength = ROUND_TO_SIZE(PAGE_SIZE, VolumeContext->SectorSize);
-
+    // 分配加密头大小的缓冲区（修正：原逻辑分配PAGE_SIZE可能过大）
     WriteBuffer = FltAllocatePoolAlignedWithTag(Instance, NonPagedPool, WriteLength, WRITE_BUFFER_TAG);
 
     if (NULL == WriteBuffer)
@@ -544,16 +542,13 @@ NTSTATUS PocAppendEncHeaderToFile(
 
     RtlZeroMemory(WriteBuffer, WriteLength);
 
-    ByteOffset.QuadPart = ROUND_TO_SIZE(FileSize, VolumeContext->SectorSize);
-
-
+    // 填充加密头数据
     RtlMoveMemory(WriteBuffer, &EncryptionHeader, sizeof(POC_ENCRYPTION_HEADER));
-
-    ((PPOC_ENCRYPTION_HEADER)WriteBuffer)->FileSize = StreamContext->FileSize;;
+    ((PPOC_ENCRYPTION_HEADER)WriteBuffer)->FileSize = StreamContext->FileSize;
     ((PPOC_ENCRYPTION_HEADER)WriteBuffer)->IsCipherText = StreamContext->IsCipherText;
-    RtlMoveMemory(((PPOC_ENCRYPTION_HEADER)WriteBuffer)->FileName, StreamContext->FileName, wcslen(StreamContext->FileName) * sizeof(WCHAR));
+    RtlMoveMemory(((PPOC_ENCRYPTION_HEADER)WriteBuffer)->FileName, StreamContext->FileName, POC_MAX_NAME_LENGTH * sizeof(WCHAR));
 
-
+    // 写入加密头到文件开头
     Status = FltWriteFileEx(
         Instance,
         FileObject,
@@ -568,18 +563,18 @@ NTSTATUS PocAppendEncHeaderToFile(
         NULL,
         NULL);
 
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) || BytesWritten != WriteLength)
     {
-        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->FltWriteFileEx failed. Status = 0x%x.\n", __FUNCTION__, Status));
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->FltWriteFileEx failed. Status = 0x%x, BytesWritten = %d\n", __FUNCTION__, Status, BytesWritten));
         goto EXIT;
     }
 
+    // 关闭文件句柄（提前关闭，避免后续操作干扰）
     if (NULL != hFile)
     {
         FltClose(hFile);
         hFile = NULL;
     }
-
     if (NULL != FileObject)
     {
         ObDereferenceObject(FileObject);
@@ -590,7 +585,6 @@ NTSTATUS PocAppendEncHeaderToFile(
 
     if (NULL != StreamContext->ShadowSectionObjectPointers->DataSectionObject)
     {
-
         Status = FltCreateFileEx(
             gFilterHandle,
             Instance,
@@ -655,9 +649,8 @@ NTSTATUS PocAppendEncHeaderToFile(
                     NULL == StreamContext->ShadowSectionObjectPointers->SharedCacheMap ? 0 : 1,
                     NULL == StreamContext->ShadowSectionObjectPointers->DataSectionObject ? 0 : 1));
         }
-        
-    }
 
+    }
 
     ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
 

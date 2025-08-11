@@ -32,6 +32,7 @@ PocPreWriteOperation(
     LONGLONG NewBufferLength = 0;
 
     LONGLONG FileSize = 0, StartingVbo = 0, ByteCount = 0, LengthReturned = 0;
+    LONGLONG AdjustedStartingVbo = 0;  // 调整后的写入偏移（跳过标识头）
 
     PPOC_VOLUME_CONTEXT VolumeContext = NULL;
     ULONG SectorSize = 0;
@@ -114,6 +115,13 @@ PocPreWriteOperation(
     //    NonCachedIo,
     //    PagingIo));
 
+    // 关键修改1：调整写入偏移（跳过标识头区域）
+    // 实际文件布局：[标识头(POC_HEADER_SIZE)][数据区]
+    // 用户写入的逻辑偏移0对应实际文件的POC_HEADER_SIZE偏移
+    AdjustedStartingVbo = StartingVbo + POC_HEADER_SIZE;
+    Data->Iopb->Parameters.Write.ByteOffset.QuadPart = AdjustedStartingVbo;
+    FltSetCallbackDataDirty(Data);  // 标记偏移修改
+
     if (POC_RENAME_TO_ENCRYPT == StreamContext->Flag && NonCachedIo)
     {
         /*
@@ -172,55 +180,15 @@ PocPreWriteOperation(
 
     if (!NonCachedIo)
     {
-        /*
-        * 16个字节以内扩展文件大小，还有一处在PreSetInfo，按道理应该是if (!PagingIo)，但
-        * NonCachedIo要求Length > SectorSize，所以if (!NonCachedIo)就行。
-        */
-
-        if (FileSize < AES_BLOCK_SIZE)
+        // 关键修改2：删除小文件扩展逻辑（不再扩展至16字节对齐）
+        // 改为直接记录原始大小（通过标识头存储，无需扩展文件）
+        if (StartingVbo + Data->Iopb->Parameters.Write.Length > StreamContext->FileSize)
         {
-            /*
-            * FSD的Write会帮我们扩展文件大小，可以在FastFat的Write中搜索ExtendingFile
-            */
-            if (StartingVbo + Data->Iopb->Parameters.Write.Length < AES_BLOCK_SIZE)
-            {
-                SwapBufferContext->OriginalLength = Data->Iopb->Parameters.Write.Length;
-
-                ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
-                StreamContext->FileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
-                StreamContext->LessThanAesBlockSize = TRUE;
-
-                ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-
-                Data->Iopb->Parameters.Write.Length = AES_BLOCK_SIZE - (ULONG)StartingVbo;
-
-                PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                    ("%s->ExtendingFile success. Filesize = %I64d StartingVbo = %I64d OriginWriteLength = %d NewLength = %d.\n",
-                        __FUNCTION__,
-                        FileSize,
-                        StartingVbo,
-                        StreamContext->FileSize,
-                        Data->Iopb->Parameters.Write.Length));
-
-                FltSetCallbackDataDirty(Data);
-
-            }
-        }
-        else if (AES_BLOCK_SIZE == FileSize)
-        {
-            /*
-            * PostWrite更新CurrentByteOffset
-            */
-            if (StartingVbo + Data->Iopb->Parameters.Write.Length < AES_BLOCK_SIZE)
-            {
-                ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
-                StreamContext->FileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
-                StreamContext->LessThanAesBlockSize = TRUE;
-
-                ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-            }
+            ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
+            // 记录实际写入后的文件大小（不含标识头）
+            StreamContext->FileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
+            StreamContext->LessThanAesBlockSize = (StreamContext->FileSize < AES_BLOCK_SIZE);
+            ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
         }
 
         /*
@@ -389,16 +357,33 @@ PocPreWriteOperation(
         
 
 
-        try 
+        try
         {
-            if (FileSize < AES_BLOCK_SIZE)
+            // 关键修改3：删除小文件强制扩展加密逻辑，使用实际大小加密
+            if (LengthReturned % AES_BLOCK_SIZE != 0 && FileSize > AES_BLOCK_SIZE)
             {
                 /*
-                * 文件大小小于块大小
+                * 当需要写的数据大于一个块时，且和块大小不对齐时，用密文挪用
                 */
+                Status = PocAesECBEncrypt_CiphertextStealing(
+                    OrigBuffer,
+                    (ULONG)LengthReturned,
+                    NewBuffer);
 
-                LengthReturned = AES_BLOCK_SIZE;
-
+                if (STATUS_SUCCESS != Status)
+                {
+                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt_CiphertextStealing failed.\n"));
+                    Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
+                    Data->IoStatus.Information = 0;
+                    Status = FLT_PREOP_COMPLETE;
+                    goto ERROR;
+                }
+            }
+            else
+            {
+                /*
+                * 对所有大小数据直接加密（包括小文件，不再强制扩展）
+                */
                 Status = PocAesECBEncrypt(
                     OrigBuffer,
                     (ULONG)LengthReturned,
@@ -407,152 +392,12 @@ PocPreWriteOperation(
 
                 if (STATUS_SUCCESS != Status)
                 {
-                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt2 failed.\n"));
+                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt failed.\n"));
                     Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
                     Data->IoStatus.Information = 0;
                     Status = FLT_PREOP_COMPLETE;
                     goto ERROR;
                 }
-
-            }
-            else if ((FileSize > StartingVbo + ByteCount) && 
-                    (FileSize - (StartingVbo + ByteCount) < AES_BLOCK_SIZE))
-            {
-                /*
-                * 当文件大于一个块，Cache Manager将数据分多次写入磁盘，
-                * 最后一次写的数据小于一个块的情况下，现在在倒数第二个块做一下处理
-                */
-
-                if (SectorSize == ByteCount)
-                {
-                    ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
-                    RtlMoveMemory(StreamContext->PageNextToLastForWrite.Buffer, OrigBuffer, SectorSize);
-                    StreamContext->PageNextToLastForWrite.StartingVbo = StartingVbo;
-                    StreamContext->PageNextToLastForWrite.ByteCount = ByteCount;
-
-                    ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-
-                    Data->IoStatus.Status = STATUS_SUCCESS;
-                    Data->IoStatus.Information = Data->Iopb->Parameters.Write.Length;
-
-                    Status = FLT_PREOP_COMPLETE;
-                    goto ERROR;
-                }
-                else if(ByteCount > SectorSize)
-                {
-
-                    ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
-                    RtlMoveMemory(StreamContext->PageNextToLastForWrite.Buffer, OrigBuffer + ByteCount - SectorSize, SectorSize);
-                    StreamContext->PageNextToLastForWrite.StartingVbo = StartingVbo + ByteCount - SectorSize;
-                    StreamContext->PageNextToLastForWrite.ByteCount = SectorSize;
-
-                    ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-
-                    LengthReturned = ByteCount - SectorSize;
-
-                    Status = PocAesECBEncrypt(
-                        OrigBuffer, 
-                        (ULONG)LengthReturned,
-                        NewBuffer, 
-                        &(ULONG)LengthReturned);
-
-                    if (STATUS_SUCCESS != Status)
-                    {
-                        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt1 failed.\n"));
-                        Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
-                        Data->IoStatus.Information = 0;
-                        Status = FLT_PREOP_COMPLETE;
-                        goto ERROR;
-                    }
-
-                    Data->Iopb->Parameters.Write.Length -= SectorSize;
-                    FltSetCallbackDataDirty(Data);
-                    SwapBufferContext->OriginalLength = (ULONG)ByteCount;
-                }
-
-            }
-            else if (FileSize > AES_BLOCK_SIZE && 
-                    LengthReturned < AES_BLOCK_SIZE)
-            {
-                /*
-                * 当文件大于一个块，Cache Manager将数据分多次写入磁盘，最后一次写的数据小于一个块时
-                */
-                ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
-                RtlMoveMemory(
-                    StreamContext->PageNextToLastForWrite.Buffer + 
-                    StreamContext->PageNextToLastForWrite.ByteCount, 
-                    OrigBuffer, LengthReturned);
-
-                ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-
-                LengthReturned = StreamContext->PageNextToLastForWrite.ByteCount + LengthReturned;
-
-                Status = PocAesECBEncrypt_CiphertextStealing(
-                    StreamContext->PageNextToLastForWrite.Buffer, 
-                    (ULONG)LengthReturned,
-                    NewBuffer);
-
-                if (STATUS_SUCCESS != Status)
-                {
-                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt_CiphertextStealing1 failed.\n"));
-                    Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
-                    Data->IoStatus.Information = 0;
-                    Status = FLT_PREOP_COMPLETE;
-                    goto ERROR;
-                }
-
-                Data->Iopb->Parameters.Write.ByteOffset.QuadPart = StreamContext->PageNextToLastForWrite.StartingVbo;
-                Data->Iopb->Parameters.Write.Length = (ULONG)(SectorSize + ByteCount);
-                FltSetCallbackDataDirty(Data);
-
-                SwapBufferContext->OriginalLength = (ULONG)ByteCount;
-
-            }
-            else if (LengthReturned % AES_BLOCK_SIZE != 0)
-            {
-                /*
-                * 当需要写的数据大于一个块时，且和块大小不对齐时，这里用密文挪用的方式，不需要增加文件大小
-                */
-
-                Status = PocAesECBEncrypt_CiphertextStealing(
-                    OrigBuffer, 
-                    (ULONG)LengthReturned,
-                    NewBuffer);
-
-                if (STATUS_SUCCESS != Status)
-                {
-                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt_CiphertextStealing2 failed.\n"));
-                    Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
-                    Data->IoStatus.Information = 0;
-                    Status = FLT_PREOP_COMPLETE;
-                    goto ERROR;
-                }
-
-            }
-            else
-            {
-                /*
-                * 当需要写的数据本身就和块大小对齐时，直接加密
-                */
-
-                Status = PocAesECBEncrypt(
-                    OrigBuffer, 
-                    (ULONG)LengthReturned,
-                    NewBuffer, 
-                    &(ULONG)LengthReturned);
-
-                if (STATUS_SUCCESS != Status)
-                {
-                    PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->PocAesECBEncrypt2 failed.\n"));
-                    Data->IoStatus.Status = STATUS_UNSUCCESSFUL;
-                    Data->IoStatus.Information = 0;
-                    Status = FLT_PREOP_COMPLETE;
-                    goto ERROR;
-                }
-
             }
 
         }
@@ -563,6 +408,7 @@ PocPreWriteOperation(
             Status = FLT_PREOP_COMPLETE;
             goto ERROR;
         }
+
 
 
 
@@ -647,6 +493,7 @@ PocPostWriteOperation(
     PPOC_STREAM_CONTEXT StreamContext = NULL;
 
     LONGLONG FileSize = 0;
+    NTSTATUS HeaderUpdateStatus = STATUS_SUCCESS;  // 标识头更新状态
 
     SwapBufferContext = CompletionContext;
     StreamContext = SwapBufferContext->StreamContext;
@@ -731,22 +578,39 @@ PocPostWriteOperation(
 
     if (Data->Iopb->Parameters.Write.ByteOffset.QuadPart +
         Data->Iopb->Parameters.Write.Length >=
-        FileSize
+        FileSize + POC_HEADER_SIZE  // 加上标识头大小判断实际文件尾
         && BooleanFlagOn(Data->Iopb->IrpFlags, IRP_NOCACHE))
     {
+        // 关键修改4：实时更新标识头（替代原标识尾逻辑）
         if (TRUE == StreamContext->IsReEncrypted)
         {
-            /*
-            * 文件被重复加密了，我们在PostClose将它解密一次
-            */
             PocUpdateFlagInStreamContext(StreamContext, POC_TO_DECRYPT_FILE);
+            // 更新标识头加密状态为未加密
+            HeaderUpdateStatus = PocUpdateEncryptionHeader(
+                FltObjects->Instance,
+                FltObjects->FileObject,
+                StreamContext,
+                FALSE  // 未加密
+            );
         }
         else
         {
-            /*
-            * 文件被加密，我们在PostClose给它写入文件标识尾
-            */
             PocUpdateFlagInStreamContext(StreamContext, POC_TO_APPEND_ENCRYPTION_HEADER);
+            // 更新标识头加密状态为已加密，并记录文件大小
+            HeaderUpdateStatus = PocUpdateEncryptionHeader(
+                FltObjects->Instance,
+                FltObjects->FileObject,
+                StreamContext,
+                TRUE  // 已加密
+            );
+        }
+
+
+        if (!NT_SUCCESS(HeaderUpdateStatus))
+        {
+            PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+                ("%s->Failed to update encryption header. Status=0x%x\n",
+                    __FUNCTION__, HeaderUpdateStatus));
         }
 
         /*
