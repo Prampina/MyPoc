@@ -1,10 +1,64 @@
-
 #include "write.h"
 #include "context.h"
 #include "utils.h"
 #include "cipher.h"
 #include "filefuncs.h"
 #include "process.h"
+
+
+// ====== 新增：辅助函数 - 快速更新标识头中的文件大小 ======
+// 放在文件顶部函数声明区域或PocPreWriteOperation之前
+NTSTATUS PocUpdateHeaderFileSize(
+    IN PPOC_STREAM_CONTEXT StreamContext,
+    IN LONGLONG NewFileSize)
+{
+    // 参数校验（防止空指针和无效值）
+    if (StreamContext == NULL || StreamContext->FlushFileObject == NULL || NewFileSize < 0)
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->无效参数\n", __FUNCTION__));
+        return STATUS_INVALID_PARAMETER;
+    }
+    const LONGLONG FILE_SIZE_OFFSET_IN_HEADER = 16;
+    
+    // 检查偏移量是否在固定标识头范围内（确保不越界）
+    if (FILE_SIZE_OFFSET_IN_HEADER < 0 ||
+        FILE_SIZE_OFFSET_IN_HEADER + sizeof(LONGLONG) > POC_HEADER_SIZE)  // POC_HEADER_SIZE是你的固定标识头大小
+    {
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->文件大小字段偏移超出标识头范围\n", __FUNCTION__));
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // 设置写入偏移
+    LARGE_INTEGER offset = { 0 };
+    offset.QuadPart = FILE_SIZE_OFFSET_IN_HEADER;  // 直接使用固定偏移
+
+    // 加锁防止并发修改冲突（使用流上下文的资源锁）
+    ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
+
+    // 写入新文件大小到标识头
+    IO_STATUS_BLOCK ioStatus;
+    NTSTATUS status = ZwWriteFile(
+        StreamContext->FlushFileObject,  // 用于写入的文件对象
+        NULL,                            // 不等待异步操作
+        NULL, NULL,                      // 无APC和上下文
+        &ioStatus,
+        &NewFileSize,                    // 待写入的文件大小值
+        sizeof(LONGLONG),                // 固定长度（8字节）
+        &offset,                         // 标识头内的偏移
+        NULL                             // 无字节偏移模式
+    );
+
+    // 同步更新内存中的文件大小（保持内存与磁盘一致）
+    if (NT_SUCCESS(status))
+    {
+        StreamContext->FileSize = NewFileSize;
+    }
+
+    // 释放锁
+    ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
+
+    return status;
+}
 
 FLT_PREOP_CALLBACK_STATUS
 PocPreWriteOperation(
@@ -32,13 +86,13 @@ PocPreWriteOperation(
     LONGLONG NewBufferLength = 0;
 
     LONGLONG FileSize = 0, StartingVbo = 0, ByteCount = 0, LengthReturned = 0;
-    LONGLONG AdjustedStartingVbo = 0;  // 调整后的写入偏移（跳过标识头）
+    LONGLONG AdjustedStartingVbo = 0;  // 调整写入偏移，跳过标记头
 
     PPOC_VOLUME_CONTEXT VolumeContext = NULL;
     ULONG SectorSize = 0;
-    
+
     PPOC_SWAP_BUFFER_CONTEXT SwapBufferContext = NULL;
-    
+
     ByteCount = Data->Iopb->Parameters.Write.Length;
     StartingVbo = Data->Iopb->Parameters.Write.ByteOffset.QuadPart;
 
@@ -69,21 +123,6 @@ PocPreWriteOperation(
     if (STATUS_SUCCESS != Status)
     {
         if (STATUS_NOT_FOUND != Status && !FsRtlIsPagingFile(Data->Iopb->TargetFileObject))
-            /*
-            * 说明不是目标扩展文件，在Create中没有创建StreamContext，不认为是个错误
-            * 或者是一个Paging file，这里会返回0xc00000bb，
-            * 原因是Fcb->Header.Flags2, FSRTL_FLAG2_SUPPORTS_FILTER_CONTEXTS被清掉了
-            *
-            //
-            //  To make FAT match the present functionality of NTFS, disable
-            //  stream contexts on paging files
-            //
-
-            if (IsPagingFile) {
-                SetFlag( Fcb->Header.Flags2, FSRTL_FLAG2_IS_PAGING_FILE );
-                ClearFlag( Fcb->Header.Flags2, FSRTL_FLAG2_SUPPORTS_FILTER_CONTEXTS );
-            }
-            */
         {
             PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->PocFindOrCreateStreamContext failed. Status = 0x%x.\n",
                 __FUNCTION__,
@@ -106,34 +145,19 @@ PocPreWriteOperation(
     }
 
 
-    //PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, 
-    //    ("\nPocPreWriteOperation->enter StartingVbo = %I64d Length = %d FileSize = %I64d ProcessName = %ws File = %ws.\n NonCachedIo = %d PagingIo = %d\n",
-    //    Data->Iopb->Parameters.Write.ByteOffset.QuadPart,
-    //    Data->Iopb->Parameters.Write.Length,
-    //    FileSize,
-    //    ProcessName, StreamContext->FileName,
-    //    NonCachedIo,
-    //    PagingIo));
-
-    // 关键修改1：调整写入偏移（跳过标识头区域）
-    // 实际文件布局：[标识头(POC_HEADER_SIZE)][数据区]
-    // 用户写入的逻辑偏移0对应实际文件的POC_HEADER_SIZE偏移
+    // 调整写入偏移，跳过标记头
     AdjustedStartingVbo = StartingVbo + POC_HEADER_SIZE;
     Data->Iopb->Parameters.Write.ByteOffset.QuadPart = AdjustedStartingVbo;
-    FltSetCallbackDataDirty(Data);  // 标记偏移修改
+    FltSetCallbackDataDirty(Data);  // 通知偏移修改
 
     if (POC_RENAME_TO_ENCRYPT == StreamContext->Flag && NonCachedIo)
     {
-        /*
-        * 未加密的doc,docx,ppt,pptx,xls,xlsx文件，进程直接写入这类文件时不会自动加密，
-        * 而是会在该进程关闭以后，我们去判断是否应该加密该类文件。
-        */
-        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, 
+        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
             ("%s->Leave PostClose will encrypt the file. StartingVbo = %I64d Length = %I64d ProcessName = %ws File = %ws.\n",
                 __FUNCTION__,
                 Data->Iopb->Parameters.Write.ByteOffset.QuadPart,
                 ByteCount,
-                ProcessName, 
+                ProcessName,
                 StreamContext->FileName));
 
         Status = FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -141,12 +165,9 @@ PocPreWriteOperation(
     }
 
 
-    if (FltObjects->FileObject->SectionObjectPointer == 
+    if (FltObjects->FileObject->SectionObjectPointer ==
         StreamContext->ShadowSectionObjectPointers)
     {
-        /*
-        * 不允许写入密文缓冲，尤其是NonCachedIo，会有死锁
-        */
         PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
             ("%s->Block NonCachedIo = %d chipertext cachemap StartingVbo = %I64d Length = %I64d ProcessName = %ws File = %ws.",
                 __FUNCTION__,
@@ -180,22 +201,29 @@ PocPreWriteOperation(
 
     if (!NonCachedIo)
     {
-        // 关键修改2：删除小文件扩展逻辑（不再扩展至16字节对齐）
-        // 改为直接记录原始大小（通过标识头存储，无需扩展文件）
-        if (StartingVbo + Data->Iopb->Parameters.Write.Length > StreamContext->FileSize)
-        {
-            ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-            // 记录实际写入后的文件大小（不含标识头）
-            StreamContext->FileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
-            StreamContext->LessThanAesBlockSize = (StreamContext->FileSize < AES_BLOCK_SIZE);
-            ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
-        }
-
         /*
-        * 在CachedIo WRITE_THROUGH时暂存，在PagingIo时取出，替换Fcb->FileSize
+        * 移除小文件自动扩展逻辑，使用实际写入大小
         */
         if (FlagOn(FltObjects->FileObject->Flags, FO_WRITE_THROUGH))
         {
+            // ====== 新增：优先更新标识头中的文件大小 ======
+        // 确保标识头已初始化且StreamContext有效
+            if (StreamContext != NULL && StreamContext->HeaderSize > 0 && StreamContext->FlushFileObject != NULL)
+            {
+                LONGLONG newFileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
+                // 仅当新大小大于当前记录时更新（避免无效写入）
+                if (newFileSize > StreamContext->FileSize)
+                {
+                    NTSTATUS updateStatus = PocUpdateHeaderFileSize(StreamContext, newFileSize);
+                    if (!NT_SUCCESS(updateStatus))
+                    {
+                        PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+                            ("%s->WRITE_THROUGH时更新标识头失败. Status = 0x%x\n",
+                                __FUNCTION__, updateStatus));
+                    }
+                }
+            }
+            // 原有逻辑：保存文件大小到上下文
             StreamContext->WriteThroughFileSize = StartingVbo + Data->Iopb->Parameters.Write.Length;
         }
     }
@@ -203,9 +231,6 @@ PocPreWriteOperation(
 
     if (!PagingIo)
     {
-        /*
-        * 需要在PostWrite修改密文缓冲的大小
-        */
         if (StartingVbo + ByteCount > FileSize)
         {
             SwapBufferContext->IsCacheExtend = TRUE;
@@ -235,7 +260,6 @@ PocPreWriteOperation(
         }
 
 
-        //LengthReturned是本次Write真正需要写的数据
         if (!PagingIo || FileSize >= StartingVbo + ByteCount)
         {
             LengthReturned = ByteCount;
@@ -246,8 +270,8 @@ PocPreWriteOperation(
         }
 
         PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->RealToWrite = %I64d.\n", LengthReturned));
-        
-        if (Data->Iopb->Parameters.Write.MdlAddress != NULL) 
+
+        if (Data->Iopb->Parameters.Write.MdlAddress != NULL)
         {
 
             FLT_ASSERT(((PMDL)Data->Iopb->Parameters.Write.MdlAddress)->Next == NULL);
@@ -255,7 +279,7 @@ PocPreWriteOperation(
             OrigBuffer = MmGetSystemAddressForMdlSafe(Data->Iopb->Parameters.Write.MdlAddress,
                 NormalPagePriority | MdlMappingNoExecute);
 
-            if (OrigBuffer == NULL) 
+            if (OrigBuffer == NULL)
             {
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->Failed to get system address for MDL: %p\n",
                     Data->Iopb->Parameters.Write.MdlAddress));
@@ -274,21 +298,16 @@ PocPreWriteOperation(
 
 
 
-
-
         if (FALSE == StreamContext->IsCipherText &&
             FileSize % SectorSize == 0 &&
             FileSize > PAGE_SIZE &&
             NonCachedIo)
         {
-            /*
-            * 表明文件被重复加密了
-            */
             if (StartingVbo <= FileSize - PAGE_SIZE &&
                 StartingVbo + ByteCount >= FileSize - PAGE_SIZE + SectorSize)
             {
                 if (strncmp(
-                    ((PPOC_ENCRYPTION_HEADER)(OrigBuffer + FileSize - PAGE_SIZE - StartingVbo))->Flag, 
+                    ((PPOC_ENCRYPTION_HEADER)(OrigBuffer + FileSize - PAGE_SIZE - StartingVbo))->Flag,
                     EncryptionHeader.Flag,
                     strlen(EncryptionHeader.Flag)) == 0)
                 {
@@ -312,18 +331,8 @@ PocPreWriteOperation(
         }
 
 
-        
-
-
-        if (FileSize > AES_BLOCK_SIZE &&
-            LengthReturned < AES_BLOCK_SIZE)
-        {
-            NewBufferLength = SectorSize + ByteCount;
-        }
-        else
-        {
-            NewBufferLength = ByteCount;
-        }
+        // 使用实际大小分配缓冲区，不强制扩展
+        NewBufferLength = ByteCount;
 
         NewBuffer = FltAllocatePoolAlignedWithTag(FltObjects->Instance, NonPagedPool, NewBufferLength, WRITE_BUFFER_TAG);
 
@@ -338,12 +347,12 @@ PocPreWriteOperation(
 
         RtlZeroMemory(NewBuffer, NewBufferLength);
 
-        if (FlagOn(Data->Flags, FLTFL_CALLBACK_DATA_IRP_OPERATION)) 
+        if (FlagOn(Data->Flags, FLTFL_CALLBACK_DATA_IRP_OPERATION))
         {
 
             NewMdl = IoAllocateMdl(NewBuffer, (ULONG)NewBufferLength, FALSE, FALSE, NULL);
 
-            if (NewMdl == NULL) 
+            if (NewMdl == NULL)
             {
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("PocPreWriteOperation->IoAllocateMdl NewMdl failed.\n"));
                 Data->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -354,17 +363,14 @@ PocPreWriteOperation(
 
             MmBuildMdlForNonPagedPool(NewMdl);
         }
-        
+
 
 
         try
         {
-            // 关键修改3：删除小文件强制扩展加密逻辑，使用实际大小加密
-            if (LengthReturned % AES_BLOCK_SIZE != 0 && FileSize > AES_BLOCK_SIZE)
+            // 根据实际数据长度选择加密方式，不强制扩展小文件
+            if (LengthReturned % AES_BLOCK_SIZE != 0)
             {
-                /*
-                * 当需要写的数据大于一个块时，且和块大小不对齐时，用密文挪用
-                */
                 Status = PocAesECBEncrypt_CiphertextStealing(
                     OrigBuffer,
                     (ULONG)LengthReturned,
@@ -381,9 +387,6 @@ PocPreWriteOperation(
             }
             else
             {
-                /*
-                * 对所有大小数据直接加密（包括小文件，不再强制扩展）
-                */
                 Status = PocAesECBEncrypt(
                     OrigBuffer,
                     (ULONG)LengthReturned,
@@ -493,7 +496,7 @@ PocPostWriteOperation(
     PPOC_STREAM_CONTEXT StreamContext = NULL;
 
     LONGLONG FileSize = 0;
-    NTSTATUS HeaderUpdateStatus = STATUS_SUCCESS;  // 标识头更新状态
+    NTSTATUS HeaderUpdateStatus = STATUS_SUCCESS;  // 标记头更新状态
 
     SwapBufferContext = CompletionContext;
     StreamContext = SwapBufferContext->StreamContext;
@@ -511,56 +514,35 @@ PocPostWriteOperation(
 
     if (BooleanFlagOn(Data->Iopb->IrpFlags, IRP_NOCACHE))
     {
-        /*
-        * 文件被修改过，且还未写入文件标识尾，阻止备份进程读文件
-        */
         ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
         StreamContext->IsDirty = TRUE;
-
         ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
     }
 
     if (!BooleanFlagOn(Data->Iopb->IrpFlags, IRP_PAGING_IO) &&
         FileSize <= AES_BLOCK_SIZE)
     {
-        /*
-        * WriteFile之类的函数，
-        * This function writes data to a file, starting at the position indicated by the file pointer. 
-        * After the write operation has been completed, 
-        * the file pointer is adjusted by the number of bytes written.
-        */
         FltObjects->FileObject->CurrentByteOffset.QuadPart = StreamContext->FileSize;
     }
 
     if (BooleanFlagOn(Data->Iopb->IrpFlags, IRP_NOCACHE) &&
-        (TRUE != StreamContext->LessThanAesBlockSize || 
+        (TRUE != StreamContext->LessThanAesBlockSize ||
             FileSize > AES_BLOCK_SIZE))
     {
-        /*
-        * 记录文件的明文大小，小于16个字节的StreamContext->FileSize已经在其他处更新过了，
-        * 这里不能再更新了，因为这里的FileSize已经是16个字节了。
-        */
         ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
         StreamContext->FileSize = FileSize;
-
         ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
     }
 
-    
-    /*
-    * 扩展密文缓冲的大小，在PostWrite是因为，我们需要它进入文件系统驱动的Write去扩展AllocationSize等值，
-    * 等这些值扩展以后，我们才能增大密文缓冲的大小。
-    */
-    if (TRUE == SwapBufferContext->IsCacheExtend && 
+
+    if (TRUE == SwapBufferContext->IsCacheExtend &&
         NULL != StreamContext->ShadowSectionObjectPointers &&
         NULL != StreamContext->ShadowSectionObjectPointers->SharedCacheMap &&
         NULL != StreamContext->ShadowFileObject)
     {
         ExAcquireResourceExclusiveLite(((PFSRTL_ADVANCED_FCB_HEADER)(FltObjects->FileObject->FsContext))->Resource, TRUE);
 
-        CcSetFileSizes(StreamContext->ShadowFileObject, 
+        CcSetFileSizes(StreamContext->ShadowFileObject,
             (PCC_FILE_SIZES) & ((PFSRTL_ADVANCED_FCB_HEADER)(FltObjects->FileObject->FsContext))->AllocationSize);
 
         ExReleaseResourceLite(((PFSRTL_ADVANCED_FCB_HEADER)(FltObjects->FileObject->FsContext))->Resource);
@@ -569,23 +551,19 @@ PocPostWriteOperation(
 
     if (0 != SwapBufferContext->OriginalLength)
     {
-        /*
-        * 写入长度被修改过，将它还原
-        */
         Data->IoStatus.Information = SwapBufferContext->OriginalLength;
     }
 
 
     if (Data->Iopb->Parameters.Write.ByteOffset.QuadPart +
         Data->Iopb->Parameters.Write.Length >=
-        FileSize + POC_HEADER_SIZE  // 加上标识头大小判断实际文件尾
+        FileSize + POC_HEADER_SIZE  // 超过原标记头大小判断实际文件尾
         && BooleanFlagOn(Data->Iopb->IrpFlags, IRP_NOCACHE))
     {
-        // 关键修改4：实时更新标识头（替代原标识尾逻辑）
+        // 实时更新尾部标记头
         if (TRUE == StreamContext->IsReEncrypted)
         {
             PocUpdateFlagInStreamContext(StreamContext, POC_TO_DECRYPT_FILE);
-            // 更新标识头加密状态为未加密
             HeaderUpdateStatus = PocUpdateEncryptionHeader(
                 FltObjects->Instance,
                 FltObjects->FileObject,
@@ -596,7 +574,6 @@ PocPostWriteOperation(
         else
         {
             PocUpdateFlagInStreamContext(StreamContext, POC_TO_APPEND_ENCRYPTION_HEADER);
-            // 更新标识头加密状态为已加密，并记录文件大小
             HeaderUpdateStatus = PocUpdateEncryptionHeader(
                 FltObjects->Instance,
                 FltObjects->FileObject,
@@ -613,15 +590,9 @@ PocPostWriteOperation(
                     __FUNCTION__, HeaderUpdateStatus));
         }
 
-        /*
-        * 表明文件已被加密，这样Read才会解密
-        */
         ExEnterCriticalRegionAndAcquireResourceExclusive(StreamContext->Resource);
-
         StreamContext->IsCipherText = TRUE;
-
         StreamContext->LessThanAesBlockSize = FALSE;
-
         ExReleaseResourceAndLeaveCriticalRegion(StreamContext->Resource);
 
         if (NULL != StreamContext->FlushFileObject)
@@ -634,6 +605,18 @@ PocPostWriteOperation(
 
     if (FlagOn(FltObjects->FileObject->Flags, FO_WRITE_THROUGH))
     {
+        // ====== 新增：保存时更新标识头校验值 ======
+        if (StreamContext != NULL && StreamContext->HeaderSize > 0 && StreamContext->FlushFileObject != NULL)
+        {
+            // 计算并更新标识头的校验值（假设PocUpdateHeaderChecksum为现有或新增的校验值更新函数）
+            NTSTATUS checksumStatus = PocUpdateHeaderChecksum(StreamContext);
+            if (!NT_SUCCESS(checksumStatus))
+            {
+                PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+                    ("%s->WRITE_THROUGH保存时更新校验值失败. Status = 0x%x\n",
+                        __FUNCTION__, checksumStatus));
+            }
+        }
         StreamContext->WriteThroughFileSize = 0;
     }
 

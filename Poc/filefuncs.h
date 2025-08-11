@@ -19,19 +19,6 @@ typedef struct _POC_ENCRYPTION_HEADER
 	
 } POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
 
-typedef struct _POC_ENCRYPTION_HEADER
-{
-	CHAR Flag[32];
-	WCHAR FileName[POC_MAX_NAME_LENGTH];
-	LONGLONG FileSize;
-	BOOLEAN IsCipherText;
-	CHAR EncryptionAlgorithmType[32];
-	CHAR KeyAndCiphertextHash[32];
-
-}POC_ENCRYPTION_HEADER, * PPOC_ENCRYPTION_HEADER;
-
-extern POC_ENCRYPTION_HEADER EncryptionHeader;
-
 extern POC_ENCRYPTION_HEADER EncryptionHeader;  // 新增：标识头全局实例
 
 // 新增：读取标识头函数声明
@@ -40,6 +27,12 @@ NTSTATUS PocReadEncryptHeader(
 	IN PFLT_VOLUME Volume,
 	IN PWCHAR FileName,
 	OUT PPOC_ENCRYPTION_HEADER OutHeader);
+
+// 新增：创建文件时初始化标识头（替代原标识尾创建函数）
+NTSTATUS PocInitEncryptionHeader(
+	IN PFLT_INSTANCE Instance,
+	IN PFILE_OBJECT FileObject,
+	IN PWCHAR FileName);
 
 NTSTATUS PocReadFileNoCache(
 	IN PFLT_INSTANCE Instance,
@@ -62,7 +55,7 @@ NTSTATUS PocCreateFileForEncHeader(
 	IN PPOC_STREAM_CONTEXT StreamContext,
 	IN PWCHAR ProcessName);
 
-NTSTATUS PocAppendEncHeaderToFile(
+NTSTATUS PocUpdateEncryptionHeader(  // 功能：保存时更新标识头动态信息
 	IN PFLT_VOLUME Volume,
 	IN PFLT_INSTANCE Instance,
 	IN PPOC_STREAM_CONTEXT StreamContext);
@@ -83,7 +76,7 @@ NTSTATUS PocReentryToDecrypt(
 	IN PFLT_INSTANCE Instance,
 	IN PWCHAR FileName);
 
-KSTART_ROUTINE PocAppendEncHeaderThread;
+KSTART_ROUTINE PocUpdateHeaderThread;  // 原名为 PocAppendEncTailerThread
 
 NTSTATUS PocReadFileFromCache(
 	IN PFLT_INSTANCE Instance,

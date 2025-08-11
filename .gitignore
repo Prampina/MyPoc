@@ -5,6 +5,7 @@
 **/obj/
 PocUserPanel/obj/*
 *.log
+*.tmp
 PocUserPanel/bin/*
 Poc/sdv/*
 Poc/smvstats.txt
