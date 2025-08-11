@@ -153,7 +153,7 @@ PocPreReadOperation(
     {
         PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
             ("PocPreReadOperation->Skip header. Old offset=%I64d, new offset=%I64d\n",
-                StartingVbo, HeaderSize));
+                (LONGLONG)StartingVbo, (LONGLONG)HeaderSize));
         StartingVbo = HeaderSize;
         Data->Iopb->Parameters.Read.ByteOffset.QuadPart = StartingVbo;
         FltSetCallbackDataDirty(Data);
