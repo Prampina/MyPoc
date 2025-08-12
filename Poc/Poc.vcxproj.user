@@ -3,7 +3,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <DbgengKernelMachineName>Vmware Windows10 x64</DbgengKernelMachineName>
     <SignMode>TestSign</SignMode>
-    <TestCertificate>CN="WDKTestCert ADMINISTRATOR0,133991066985609225" | 3DC18EEE5FD6E8D9B1ED3F4F149722D07EBA45B9</TestCertificate>
+    <TestCertificate>CN="WDKTestCert ADMINISTRATOR0,133993786200807859" | C2A20F9788930A023FAE60DD19B191F0B0BD5876</TestCertificate>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <DbgengKernelMachineName>Vmware Windows10 x64</DbgengKernelMachineName>

@@ -1770,7 +1770,6 @@ NTSTATUS PocInitEncryptionHeader(
 
     // 获取卷信息（用于对齐）
     PFLT_VOLUME Volume = NULL;
-    NTSTATUS Status;
 
     // 先通过实例获取卷（直接在调用处处理参数）
     Status = FltGetVolumeFromInstance(Instance, &Volume);

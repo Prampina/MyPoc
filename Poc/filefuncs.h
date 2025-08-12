@@ -98,3 +98,9 @@ VOID PocPurgeCache(
 	IN PWCHAR FileName,
 	IN PFLT_INSTANCE Instance,
 	IN PSECTION_OBJECT_POINTERS SectionObjectPointers);
+
+// 新增：初始化标识头（文件创建时写入）
+NTSTATUS PocInitEncryptionHeader(
+	IN PFLT_INSTANCE Instance,
+	IN PFILE_OBJECT FileObject,
+	IN PWCHAR FileName);
