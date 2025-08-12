@@ -567,8 +567,7 @@ PocPostWriteOperation(
             HeaderUpdateStatus = PocUpdateEncryptionHeader(
                 FltObjects->Instance,
                 FltObjects->FileObject,
-                StreamContext,
-                FALSE  // 未加密
+                StreamContext
             );
         }
         else
@@ -577,8 +576,7 @@ PocPostWriteOperation(
             HeaderUpdateStatus = PocUpdateEncryptionHeader(
                 FltObjects->Instance,
                 FltObjects->FileObject,
-                StreamContext,
-                TRUE  // 已加密
+                StreamContext
             );
         }
 
@@ -605,18 +603,6 @@ PocPostWriteOperation(
 
     if (FlagOn(FltObjects->FileObject->Flags, FO_WRITE_THROUGH))
     {
-        // ====== 新增：保存时更新标识头校验值 ======
-        if (StreamContext != NULL && StreamContext->HeaderSize > 0 && StreamContext->FlushFileObject != NULL)
-        {
-            // 计算并更新标识头的校验值（假设PocUpdateHeaderChecksum为现有或新增的校验值更新函数）
-            NTSTATUS checksumStatus = PocUpdateHeaderChecksum(StreamContext);
-            if (!NT_SUCCESS(checksumStatus))
-            {
-                PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
-                    ("%s->WRITE_THROUGH保存时更新校验值失败. Status = 0x%x\n",
-                        __FUNCTION__, checksumStatus));
-            }
-        }
         StreamContext->WriteThroughFileSize = 0;
     }
 

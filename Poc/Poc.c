@@ -923,7 +923,7 @@ PocPostCreateOperationWhenSafe(
         {
             NTSTATUS headerInitStatus;
             // 初始化标识头（包含文件基础信息，与标识尾字段对应但存储在文件头部）
-            headerInitStatus = PocInitEncryptHeader(StreamContext, FileName);
+            headerInitStatus = PocInitEncryptionHeader(StreamContext->Instance, FltObjects->FileObject, FileName);
             if (!NT_SUCCESS(headerInitStatus))
             {
                 PT_DBG_PRINT(PTDBG_TRACE_ROUTINES, ("%s->Failed to init encrypt header. Status = 0x%x\n",
@@ -1277,7 +1277,7 @@ PocPostCloseOperationWhenSafe(
             NULL,
             NULL,
             NULL,
-            PocAppendEncHeaderThread,
+            PocInitEncryptionHeader,
             StreamContext);
 
         if (STATUS_SUCCESS != Status)
